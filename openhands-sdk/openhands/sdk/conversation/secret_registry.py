@@ -1,12 +1,48 @@
 """Secrets manager for handling sensitive data in conversations."""
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 
 from pydantic import Field, PrivateAttr, SecretStr
 
 from openhands.sdk.logger import get_logger
 from openhands.sdk.secret import SecretSource, SecretValue, StaticSecret
 from openhands.sdk.utils.models import OpenHandsModel
+
+
+# Minimum length for a substring of a secret value to be considered a leak.
+# Shorter substrings are ignored to avoid false positives from common words.
+_MIN_LEAK_SUBSTRING_LENGTH = 8
+
+# Maximum length of context snippet to include in leak reports.
+_MAX_CONTEXT_SNIPPET_LENGTH = 80
+
+
+@dataclass
+class SecretLeakInfo:
+    """Information about a detected secret leak."""
+
+    secret_name: str
+    context_snippet: str
+
+
+class SecretLeakError(Exception):
+    """Raised when a registered secret value is detected in content about to be
+    sent to the LLM.
+
+    This exception should trigger an immediate halt of the agent loop and
+    notify the user to rotate the leaked secret.
+    """
+
+    def __init__(self, leaked_secrets: dict[str, SecretLeakInfo]):
+        self.leaked_secrets = leaked_secrets
+        names = ", ".join(leaked_secrets.keys())
+        super().__init__(
+            f"SECRET LEAK DETECTED: The following secrets leaked into agent "
+            f"context: {names}. The agent has been halted to prevent these "
+            f"values from being sent to the LLM. Rotate these secrets "
+            f"immediately."
+        )
 
 
 logger = get_logger(__name__)
@@ -115,6 +151,88 @@ class SecretRegistry(OpenHandsModel):
             masked_text = masked_text.replace(value, "<secret-hidden>")
 
         return masked_text
+
+    def check_for_leaks(self, text: str) -> dict[str, SecretLeakInfo]:
+        """Check if any registered secret VALUES appear in the given text.
+
+        This is a safety guard that scans content about to be sent to the LLM
+        for actual secret values. Unlike ``find_secrets_in_text`` which looks
+        for secret KEY names (e.g. ``$API_KEY``), this checks for secret VALUES
+        (e.g. the actual token ``ghp_abc123...``).
+
+        The check covers:
+        - All registered secret source values (retrieved on demand)
+        - Previously exported values (tracked in ``_exported_values``)
+        - Partial substring matches >= ``_MIN_LEAK_SUBSTRING_LENGTH`` chars
+
+        Args:
+            text: The text to scan for secret value leaks.
+
+        Returns:
+            Dict mapping leaked secret names to ``SecretLeakInfo``.
+            Empty dict if no leaks are detected.
+        """
+        if not text or not self.secret_sources:
+            return {}
+
+        leaks: dict[str, SecretLeakInfo] = {}
+
+        for name, source in self.secret_sources.items():
+            try:
+                value = source.get_value()
+            except Exception:
+                # If we can't retrieve the value, check exported values
+                value = self._exported_values.get(name)
+
+            if not value:
+                continue
+
+            # Check for the full value first (fast path)
+            idx = text.find(value)
+            if idx == -1:
+                # Try partial substrings >= minimum length
+                idx = self._find_substring_match(text, value)
+
+            if idx >= 0:
+                snippet = self._build_context_snippet(text, value, idx)
+                leaks[name] = SecretLeakInfo(
+                    secret_name=name,
+                    context_snippet=snippet,
+                )
+
+        return leaks
+
+    def _find_substring_match(self, text: str, value: str) -> int:
+        """Find the position of any substantial substring of ``value`` in ``text``.
+
+        Only substrings of length >= ``_MIN_LEAK_SUBSTRING_LENGTH`` are checked
+        to avoid false positives from short, common character sequences.
+        """
+        if len(value) < _MIN_LEAK_SUBSTRING_LENGTH:
+            return -1
+        # Slide a window of MIN_LENGTH across the secret value
+        for start in range(len(value) - _MIN_LEAK_SUBSTRING_LENGTH + 1):
+            chunk = value[start : start + _MIN_LEAK_SUBSTRING_LENGTH]
+            idx = text.find(chunk)
+            if idx >= 0:
+                return idx
+        return -1
+
+    @staticmethod
+    def _build_context_snippet(text: str, secret_value: str, match_idx: int) -> str:
+        """Build a truncated context snippet around the match, with the secret
+        value redacted.
+        """
+        half = _MAX_CONTEXT_SNIPPET_LENGTH // 2
+        start = max(0, match_idx - half)
+        end = min(len(text), match_idx + len(secret_value) + half)
+        snippet = text[start:end]
+        # Redact the secret value from the snippet
+        snippet = snippet.replace(secret_value, "<redacted>")
+        # Add ellipsis if truncated
+        prefix = "..." if start > 0 else ""
+        suffix = "..." if end < len(text) else ""
+        return f"{prefix}{snippet}{suffix}"
 
     def get_secret_infos(self) -> list[dict[str, str | None]]:
         """Get secret information (name and description) for prompt inclusion.

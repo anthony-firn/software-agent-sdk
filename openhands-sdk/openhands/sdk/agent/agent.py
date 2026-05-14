@@ -31,6 +31,10 @@ from openhands.sdk.conversation import (
     ConversationTokenCallbackType,
     LocalConversation,
 )
+from openhands.sdk.conversation.secret_registry import (
+    SecretLeakError,
+    SecretRegistry,
+)
 from openhands.sdk.conversation.state import ConversationExecutionStatus
 from openhands.sdk.event import (
     ActionEvent,
@@ -123,6 +127,7 @@ class _ActionBatch:
     has_finish: bool
     blocked_reasons: dict[str, str] = field(default_factory=dict)
     results_by_id: dict[str, list[Event]] = field(default_factory=dict)
+    secret_registry: SecretRegistry | None = None
 
     @staticmethod
     def _truncate_at_finish(
@@ -181,10 +186,11 @@ class _ActionBatch:
             has_finish=has_finish,
             blocked_reasons=blocked_reasons,
             results_by_id=results_by_id,
+            secret_registry=state.secret_registry,
         )
 
     def emit(self, on_event: ConversationCallbackType) -> None:
-        """Emit all events in original action order."""
+        """Emit all events in original action order, checking for secret leaks."""
         for ae in self.action_events:
             reason = self.blocked_reasons.get(ae.id)
             if reason is not None:
@@ -200,6 +206,18 @@ class _ActionBatch:
                 )
             else:
                 for event in self.results_by_id[ae.id]:
+                    # Check for secret leaks in observations before emitting
+                    if isinstance(event, ObservationEvent) and self.secret_registry:
+                        observation_text = "".join(
+                            c.text
+                            for c in event.observation.to_llm_content
+                            if isinstance(c, TextContent)
+                        )
+                        leaks = self.secret_registry.check_for_leaks(
+                            observation_text
+                        )
+                        if leaks:
+                            raise SecretLeakError(leaked_secrets=leaks)
                     on_event(event)
 
     def finalize(
@@ -458,7 +476,26 @@ class Agent(CriticMixin, ResponseDispatchMixin, AgentBase):
             tool_runner=lambda ae: self._execute_action_event(conversation, ae),
             tools=self.tools_map,
         )
-        batch.emit(on_event)
+        try:
+            batch.emit(on_event)
+        except SecretLeakError as e:
+            logger.error(str(e))
+            # Pause the conversation and emit error to user
+            state.execution_status = ConversationExecutionStatus.PAUSED
+            on_event(
+                AgentErrorEvent(
+                    error=(
+                        f"🔐 SECRET LEAK DETECTED: The following secrets were "
+                        f"found in tool output and were about to be sent to the "
+                        f"LLM: {', '.join(e.leaked_secrets.keys())}. "
+                        f"The conversation has been paused. "
+                        f"ROTATE THESE SECRETS IMMEDIATELY."
+                    ),
+                    tool_name="secret_leak_guard",
+                    tool_call_id="",
+                )
+            )
+            return
         batch.finalize(
             on_event=on_event,
             check_iterative_refinement=lambda ae: (
