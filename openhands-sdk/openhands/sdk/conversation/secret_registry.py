@@ -2,12 +2,16 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from pydantic import Field, PrivateAttr, SecretStr
+from pydantic import BaseModel, Field, PrivateAttr, SecretStr
 
 from openhands.sdk.logger import get_logger
 from openhands.sdk.secret import SecretSource, SecretValue, StaticSecret
 from openhands.sdk.utils.models import OpenHandsModel
+
+if TYPE_CHECKING:
+    from openhands.sdk.tool.schema import Observation
 
 
 # Minimum length for a substring of a secret value to be considered a leak.
@@ -218,6 +222,32 @@ class SecretRegistry(OpenHandsModel):
                 return idx
         return -1
 
+    def get_leaked_values(self, names: list[str]) -> list[str]:
+        """Retrieve the raw values for the given secret names for masking.
+
+        The values are also tracked in ``_exported_values`` so subsequent
+        calls to ``mask_secrets_in_output`` will catch them too.
+
+        Args:
+            names: List of secret names whose values to retrieve.
+
+        Returns:
+            List of non-empty secret values.
+        """
+        values: list[str] = []
+        for name in names:
+            source = self.secret_sources.get(name)
+            if source is None:
+                continue
+            try:
+                value = source.get_value()
+            except Exception:
+                value = self._exported_values.get(name)
+            if value:
+                self._exported_values[name] = value
+                values.append(value)
+        return values
+
     @staticmethod
     def _build_context_snippet(text: str, secret_value: str, match_idx: int) -> str:
         """Build a truncated context snippet around the match, with the secret
@@ -298,6 +328,53 @@ class SecretRegistry(OpenHandsModel):
                 f"Unexpected error retrieving secret '{name}': {type(e).__name__}: {e}"
             )
             return None
+
+    def check_action_for_egress(self, action: BaseModel) -> dict[str, SecretLeakInfo]:
+        """Check whether a tool action's serialized parameters contain secret values.
+
+        Serializes the action to JSON and runs ``check_for_leaks`` on the result.
+        Use this before executing a tool to prevent secrets from being sent out
+        via network requests, command arguments, environment variables, etc.
+
+        Args:
+            action: The Action object about to be executed.
+
+        Returns:
+            Dict of leaked secret names to ``SecretLeakInfo`` (empty if clean).
+        """
+        # model_dump_json exposes all field values, including any secrets the
+        # LLM may have injected into tool parameters (prompt injection).
+        serialized = action.model_dump_json()
+        return self.check_for_leaks(serialized)
+
+    @staticmethod
+    def create_egress_blocked_observation(
+        leaked_names: list[str],
+    ) -> "Observation":
+        """Create an error observation for a blocked egress attempt.
+
+        The observation text names the blocked secrets but does NOT contain
+        the actual secret values.
+
+        Args:
+            leaked_names: Names of the secrets that were detected.
+
+        Returns:
+            An error ``Observation`` indicating egress was blocked.
+        """
+        from openhands.sdk.tool.builtins.finish import FinishObservation
+
+        names_str = ", ".join(sorted(leaked_names))
+        return FinishObservation.from_text(
+            (
+                f"🚫 EGRESS BLOCKED: Tool execution was prevented because "
+                f"the action parameters contained the following registered "
+                f"secret names: {names_str}. The agent should use secret "
+                f"references exactly as configured (e.g. $API_KEY) — never "
+                f"pass raw secret values to any tool."
+            ),
+            is_error=True,
+        )
 
 
 def _wrap_secret(value: SecretValue) -> SecretSource:

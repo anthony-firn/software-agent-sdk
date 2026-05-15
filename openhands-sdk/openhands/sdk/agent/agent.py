@@ -31,10 +31,7 @@ from openhands.sdk.conversation import (
     ConversationTokenCallbackType,
     LocalConversation,
 )
-from openhands.sdk.conversation.secret_registry import (
-    SecretLeakError,
-    SecretRegistry,
-)
+from openhands.sdk.conversation.secret_registry import SecretRegistry
 from openhands.sdk.conversation.state import ConversationExecutionStatus
 from openhands.sdk.event import (
     ActionEvent,
@@ -190,7 +187,7 @@ class _ActionBatch:
         )
 
     def emit(self, on_event: ConversationCallbackType) -> None:
-        """Emit all events in original action order, checking for secret leaks."""
+        """Emit all events in original action order, masking any leaked secrets."""
         for ae in self.action_events:
             reason = self.blocked_reasons.get(ae.id)
             if reason is not None:
@@ -206,8 +203,9 @@ class _ActionBatch:
                 )
             else:
                 for event in self.results_by_id[ae.id]:
-                    # Check for secret leaks in observations before emitting
+                    # Check for and mask secret leaks in observations
                     if isinstance(event, ObservationEvent) and self.secret_registry:
+                        # Gather all text for leak scanning
                         observation_text = "".join(
                             c.text
                             for c in event.observation.to_llm_content
@@ -217,7 +215,21 @@ class _ActionBatch:
                             observation_text
                         )
                         if leaks:
-                            raise SecretLeakError(leaked_secrets=leaks)
+                            names = ", ".join(leaks.keys())
+                            logger.warning(
+                                f"Secret leak prevented: masked {names} in "
+                                f"observation output before LLM context."
+                            )
+                            # Retrieve values and mask them in observation content
+                            values_to_mask = self.secret_registry.get_leaked_values(
+                                list(leaks.keys())
+                            )
+                            for content_item in event.observation.content:
+                                if isinstance(content_item, TextContent):
+                                    for value in values_to_mask:
+                                        content_item.text = content_item.text.replace(
+                                            value, "<secret-hidden>"
+                                        )
                     on_event(event)
 
     def finalize(
@@ -476,26 +488,7 @@ class Agent(CriticMixin, ResponseDispatchMixin, AgentBase):
             tool_runner=lambda ae: self._execute_action_event(conversation, ae),
             tools=self.tools_map,
         )
-        try:
-            batch.emit(on_event)
-        except SecretLeakError as e:
-            logger.error(str(e))
-            # Pause the conversation and emit error to user
-            state.execution_status = ConversationExecutionStatus.PAUSED
-            on_event(
-                AgentErrorEvent(
-                    error=(
-                        f"🔐 SECRET LEAK DETECTED: The following secrets were "
-                        f"found in tool output and were about to be sent to the "
-                        f"LLM: {', '.join(e.leaked_secrets.keys())}. "
-                        f"The conversation has been paused. "
-                        f"ROTATE THESE SECRETS IMMEDIATELY."
-                    ),
-                    tool_name="secret_leak_guard",
-                    tool_call_id="",
-                )
-            )
-            return
+        batch.emit(on_event)
         batch.finalize(
             on_event=on_event,
             check_iterative_refinement=lambda ae: (
@@ -953,6 +946,30 @@ class Agent(CriticMixin, ResponseDispatchMixin, AgentBase):
             )
 
         # Execute actions!
+        # Check action parameters for secret values before execution
+        # (prompt injection / egress guard)
+        state = conversation.state
+        egress_registry = state.secret_registry if state else None
+        action = action_event.action
+        if egress_registry and action is not None:
+            egress_leaks = egress_registry.check_action_for_egress(action)
+            if egress_leaks:
+                leaked_names = list(egress_leaks.keys())
+                logger.warning(
+                    f"Egress blocked: prevented tool '{action_event.tool_name}' "
+                    f"from executing with secrets in parameters: "
+                    f"{', '.join(leaked_names)}"
+                )
+                blocked_obs = egress_registry.create_egress_blocked_observation(
+                    leaked_names
+                )
+                obs_event = ObservationEvent(
+                    observation=blocked_obs,
+                    action_id=action_event.id,
+                    tool_name=tool.name,
+                    tool_call_id=action_event.tool_call.id,
+                )
+                return [obs_event]
         try:
             if should_enable_observability():
                 tool_name = extract_action_name(action_event)
