@@ -2,6 +2,7 @@
 
 from base64 import urlsafe_b64encode
 
+import pytest
 from cryptography.fernet import Fernet
 from pydantic import SecretStr
 
@@ -245,9 +246,7 @@ def test_cipher_secret_key_not_plaintext_in_vars():
         f"Cipher._secret_key must be SecretStr, got {type(stored).__name__}"
     )
     # SecretStr repr must not expose the value.
-    assert key not in repr(stored), (
-        f"SecretStr repr leaks the key: {repr(stored)}"
-    )
+    assert key not in repr(stored), f"SecretStr repr leaks the key: {repr(stored)}"
 
 
 def test_cipher_repr_does_not_leak_key():
@@ -256,6 +255,27 @@ def test_cipher_repr_does_not_leak_key():
     cipher = Cipher(key)
 
     r = repr(cipher)
-    assert key not in r, (
-        f"repr(cipher) leaks the secret key: {r}"
-    )
+    assert key not in r, f"repr(cipher) leaks the secret key: {r}"
+
+
+def test_cipher_rejects_short_key():
+    """Cipher must reject keys that are trivially brute-forceable.
+
+    A 3-character key has ~18 bits of entropy (assuming alphanumeric).
+    SHA256 is designed to be fast (~10M hashes/sec), so an attacker
+    with the ciphertext can brute-force this in microseconds.
+
+    Minimum acceptable: 12 characters.
+    """
+    with pytest.raises(ValueError, match="at least 12"):
+        Cipher("cat")
+
+
+def test_cipher_accepts_adequate_key():
+    """Cipher must accept keys that provide sufficient brute-force resistance."""
+    key = "a" * 12  # 12 characters
+    cipher = Cipher(key)
+    encrypted = cipher.encrypt(SecretStr("test-secret"))
+    decrypted = cipher.decrypt(encrypted)
+    assert decrypted is not None
+    assert decrypted.get_secret_value() == "test-secret"

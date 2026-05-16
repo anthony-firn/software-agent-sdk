@@ -178,7 +178,7 @@ def test_agent_mcp_config_decryption_without_cipher_logs_warning() -> None:
     llm = LLM(model="test-model", usage_id="test-llm")
     mcp_config = {"mcpServers": {"fetch": {"command": "uvx"}}}
     agent = Agent(llm=llm, tools=[], mcp_config=cast(dict[str, object], mcp_config))
-    cipher = Cipher(secret_key="test-key")
+    cipher = Cipher(secret_key="test-key-12chars")
 
     # Serialize with cipher
     agent_json = agent.model_dump_json(context={"cipher": cipher})
@@ -215,7 +215,7 @@ def test_agent_mcp_config_empty_not_encrypted() -> None:
 
     llm = LLM(model="test-model", usage_id="test-llm")
     agent = Agent(llm=llm, tools=[], mcp_config={})  # Empty config
-    cipher = Cipher(secret_key="test-key")
+    cipher = Cipher(secret_key="test-key-12chars")
 
     # Serialize with cipher - should NOT have encrypted_mcp_config for empty
     agent_dump = agent.model_dump(context={"cipher": cipher})

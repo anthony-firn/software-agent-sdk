@@ -19,15 +19,28 @@ from pydantic import SecretStr
 FERNET_TOKEN_PREFIX: Final[str] = "gAAAAA"
 
 
+_MIN_SECRET_KEY_LENGTH = 12
+
+
 class Cipher:
     """
     Simple encryption utility for preventing accidental secret disclosure.
 
     The secret key is stored internally as ``SecretStr`` to prevent
     accidental disclosure via ``vars(cipher)`` or debug introspection.
+
+    The key must be at least ``_MIN_SECRET_KEY_LENGTH`` characters to
+    provide meaningful brute-force resistance when combined with the
+    fast SHA256-based key derivation.
     """
 
     def __init__(self, secret_key: str):
+        if len(secret_key) < _MIN_SECRET_KEY_LENGTH:
+            raise ValueError(
+                f"Secret key must be at least "
+                f"{_MIN_SECRET_KEY_LENGTH} characters "
+                f"(got {len(secret_key)})."
+            )
         self._secret_key = SecretStr(secret_key)
         self._fernet: Fernet | None = None
 
