@@ -180,3 +180,82 @@ def test_cipher_long_content():
 
     assert decrypted is not None
     assert decrypted.get_secret_value() == long_secret
+
+
+def test_cipher_decrypt_only_catches_invalid_token():
+    """decrypt() must only catch InvalidToken, not arbitrary exceptions.
+
+    Catching ``Exception`` is too broad and can silently swallow bugs
+    like MemoryError or TypeError from programming errors.
+    """
+    key = urlsafe_b64encode(b"a" * 32).decode("ascii")
+    cipher = Cipher(key)
+
+    # Verify decrypt catches InvalidToken (legitimate crypto failure)
+    result = cipher.decrypt("garbage-data-that-cant-be-decrypted")
+    assert result is None  # gracefully handled
+
+    # Verify that a simulated arbitrary Exception is NOT caught.
+    # We use a mock to prove the function doesn't have except Exception.
+    original = cipher._get_fernet
+
+    class _BadFernet:
+        def decrypt(self, data):
+            raise RuntimeError("simulated non-crypto failure")
+
+    cipher._get_fernet = lambda: _BadFernet()  # type: ignore[assignment]
+
+    try:
+        cipher.decrypt("any-value")
+    except RuntimeError:
+        pass  # expected — broad except would have swallowed this
+    else:
+        raise AssertionError(
+            "decrypt() should NOT catch arbitrary RuntimeError exceptions. "
+            "The except clause is still too broad (likely 'except Exception')."
+        )
+    finally:
+        cipher._get_fernet = original
+
+
+def test_cipher_secret_key_not_plaintext_in_vars():
+    """The encryption key must not be readable as plaintext from ``vars()``.
+
+    Storing the secret key as a bare ``str`` on the instance means anyone
+    with access to the Cipher object can extract the key via ``vars(cipher)``
+    or ``cipher.__dict__``. The key should be stored via ``SecretStr`` so
+    that accidental logging, debugging, or introspection cannot trivially
+    expose it.
+    """
+    from pydantic import SecretStr
+
+    key = urlsafe_b64encode(b"a" * 32).decode("ascii")
+    cipher = Cipher(key)
+
+    # The key must NOT appear as a plain string anywhere in __dict__.
+    for attr, value in vars(cipher).items():
+        if isinstance(value, str) and key in value:
+            raise AssertionError(
+                f"Cipher.{attr} exposes the secret key as plain str: {value!r}"
+            )
+
+    # The key must be stored as SecretStr (masked by repr).
+    stored = vars(cipher).get("_secret_key")
+    assert isinstance(stored, SecretStr), (
+        f"Cipher._secret_key must be SecretStr, got {type(stored).__name__}"
+    )
+    # SecretStr repr must not expose the value.
+    assert key not in repr(stored), (
+        f"SecretStr repr leaks the key: {repr(stored)}"
+    )
+
+
+def test_cipher_repr_does_not_leak_key():
+    """``repr(cipher)`` must not expose the encryption key."""
+    key = urlsafe_b64encode(b"a" * 32).decode("ascii")
+    cipher = Cipher(key)
+
+    r = repr(cipher)
+    assert key not in r, (
+        f"repr(cipher) leaks the secret key: {r}"
+    )

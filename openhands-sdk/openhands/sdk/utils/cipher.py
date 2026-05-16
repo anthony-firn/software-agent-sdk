@@ -22,11 +22,17 @@ FERNET_TOKEN_PREFIX: Final[str] = "gAAAAA"
 class Cipher:
     """
     Simple encryption utility for preventing accidental secret disclosure.
+
+    The secret key is stored internally as ``SecretStr`` to prevent
+    accidental disclosure via ``vars(cipher)`` or debug introspection.
     """
 
     def __init__(self, secret_key: str):
-        self.secret_key = secret_key
+        self._secret_key = SecretStr(secret_key)
         self._fernet: Fernet | None = None
+
+    def __repr__(self) -> str:
+        return f"Cipher(id={id(self)})"
 
     def encrypt(self, secret: SecretStr | None) -> str | None:
         if secret is None:
@@ -51,7 +57,7 @@ class Cipher:
             fernet = self._get_fernet()
             decrypted = fernet.decrypt(secret.encode()).decode()
             return SecretStr(decrypted)
-        except Exception as e:
+        except InvalidToken as e:
             # Import here to avoid circular imports
             from openhands.sdk.logger import get_logger
 
@@ -71,11 +77,9 @@ class Cipher:
             return None
 
     def _get_fernet(self):
-        fernet = self._fernet
-        if fernet is None:
-            secret_key = self.secret_key.encode()
+        if self._fernet is None:
+            secret_key = self._secret_key.get_secret_value().encode()
             # Hash the key to make sure we have a 256 bit value
             fernet_key = b64encode(hashlib.sha256(secret_key).digest())
-            fernet = Fernet(fernet_key)
-            object.__setattr__(self, "_fernet", fernet)
-        return fernet
+            self._fernet = Fernet(fernet_key)
+        return self._fernet
