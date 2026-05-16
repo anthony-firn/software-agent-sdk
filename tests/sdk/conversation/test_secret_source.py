@@ -302,3 +302,97 @@ def test_lookup_secret_get_value_resolves_relative_url(monkeypatch):
         headers={},
         timeout=30.0,
     )
+
+
+def test_lookup_secret_serialize_headers_returns_plain_strings():
+    """Header serialization must return plain strings, not SecretStr objects.
+
+    When serialize_secret returns a SecretStr (redacted mode), the serializer
+    currently embeds the SecretStr object in the result dict. This test calls
+    the serializer via a mock SerializationInfo to verify the raw return value
+    contains only plain strings (no SecretStr leakage).
+    """
+    from unittest.mock import MagicMock
+
+    secret = LookupSecret(
+        url="https://api.example.com/secrets",
+        headers={
+            "X-Access-Token": "plaintext-token-value",
+            "Content-Type": "application/json",
+        },
+    )
+
+    # Call the field serializer directly — bypasses Pydantic's dict-to-JSON
+    # str() coercion that currently masks the SecretStr embedding.
+    info = MagicMock()
+    info.context = {}  # no cipher, no expose_secrets → redacted mode
+    info.mode = "json"
+    result = secret._serialize_secrets(secret.headers, info)
+
+    # All values must be plain str, never SecretStr
+    x_token = result.get("X-Access-Token")
+    assert isinstance(x_token, str), (
+        f"Expected str, got {type(x_token)}. SecretStr was leaked into the "
+        "serialized dict instead of being explicitly extracted."
+    )
+    assert x_token == "**********"
+    assert isinstance(result["Content-Type"], str)
+
+
+def test_lookup_secret_get_value_enforces_response_size_limit():
+    """``get_value()`` must reject responses larger than the max size.
+
+    Without a size limit, a malicious or misconfigured secret endpoint
+    could exhaust memory by returning gigabytes of data. The limit should
+    be generous enough for any real secret (e.g. 100 KB) but small enough
+    to prevent memory exhaustion.
+    """
+    large_body = "x" * (1024 * 1024)  # 1 MB — well over any reasonable limit
+
+    response = Mock()
+    response.raise_for_status = Mock()
+    response.headers = {"content-length": str(len(large_body))}
+    response.text = large_body
+
+    with patch("openhands.sdk.secret.secrets.httpx.get", return_value=response):
+        secret = LookupSecret(url="https://api.example.com/secrets/MY_TOKEN")
+
+        with pytest.raises(ValueError, match="too large"):
+            secret.get_value()
+
+
+def test_lookup_secret_get_value_accepts_small_response():
+    """``get_value()`` must accept responses within the size limit."""
+    body = "sk-my-small-secret-key"
+
+    response = Mock()
+    response.raise_for_status = Mock()
+    response.headers = {"content-length": str(len(body))}
+    response.text = body
+
+    with patch("openhands.sdk.secret.secrets.httpx.get", return_value=response):
+        secret = LookupSecret(url="https://api.example.com/secrets/MY_TOKEN")
+        assert secret.get_value() == body
+
+
+def test_lookup_secret_rejects_non_http_url():
+    """``LookupSecret`` must reject URLs with non-http schemes.
+
+    Accepting schemes like ``file://`` or ``gopher://`` (even if httpx
+    would reject them) is a defense-in-depth issue. Only ``http`` and
+    ``https`` should be accepted.
+    """
+    with pytest.raises(ValueError, match="URL scheme"):
+        LookupSecret(url="file:///etc/passwd")
+
+
+def test_lookup_secret_accepts_http_url():
+    """``LookupSecret`` must accept http URLs (e.g. local dev)."""
+    secret = LookupSecret(url="http://127.0.0.1:8000/api/secrets/MY_TOKEN")
+    assert secret.url == "http://127.0.0.1:8000/api/secrets/MY_TOKEN"
+
+
+def test_lookup_secret_accepts_https_url():
+    """``LookupSecret`` must accept https URLs."""
+    secret = LookupSecret(url="https://api.example.com/secrets/MY_TOKEN")
+    assert secret.url == "https://api.example.com/secrets/MY_TOKEN"

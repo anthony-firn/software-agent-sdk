@@ -22,6 +22,14 @@ logger = get_logger(__name__)
 _INTERNAL_SERVER_URL_ENV = "OH_INTERNAL_SERVER_URL"
 _DEFAULT_INTERNAL_SERVER_URL = "http://127.0.0.1:8000"
 
+_ALLOWED_URL_SCHEMES = frozenset({"http", "https"})
+
+# Maximum size (bytes) for a secret value fetched via LookupSecret.
+# Secrets are small tokens, not large payloads. 100 KB is generous
+# enough for any real token while preventing memory exhaustion from
+# a misconfigured or compromised endpoint.
+_MAX_SECRET_VALUE_SIZE = 100 * 1024  # 100 KB
+
 
 def _resolve_lookup_secret_url(url: str) -> str:
     parsed = urlsplit(url)
@@ -30,6 +38,13 @@ def _resolve_lookup_secret_url(url: str) -> str:
 
     base_url = os.getenv(_INTERNAL_SERVER_URL_ENV, _DEFAULT_INTERNAL_SERVER_URL)
     return urljoin(f"{base_url.rstrip('/')}/", url)
+
+
+def _validate_url_scheme(url: str) -> None:
+    """Raise ``ValueError`` if *url* does not use http or https."""
+    scheme = urlsplit(url).scheme
+    if scheme not in _ALLOWED_URL_SCHEMES:
+        raise ValueError(f"URL scheme must be http or https, got '{scheme}' in: {url}")
 
 
 class SecretSource(DiscriminatedUnionMixin, ABC):
@@ -74,12 +89,34 @@ class LookupSecret(SecretSource):
     @field_validator("url")
     @classmethod
     def _normalize_url(cls, url: str) -> str:
-        return _resolve_lookup_secret_url(url)
+        resolved = _resolve_lookup_secret_url(url)
+        _validate_url_scheme(resolved)
+        return resolved
 
     def get_value(self) -> str:
         response = httpx.get(self.url, headers=self.headers, timeout=30.0)
         response.raise_for_status()
-        return response.text
+
+        # Check Content-Length header before reading the body (cheap).
+        content_length = response.headers.get("content-length")
+        if content_length is not None:
+            try:
+                length = int(content_length)
+            except (ValueError, TypeError):
+                length = 0
+            if length > _MAX_SECRET_VALUE_SIZE:
+                raise ValueError(
+                    f"Secret response too large: Content-Length={length} "
+                    f"(max {_MAX_SECRET_VALUE_SIZE} bytes)"
+                )
+
+        body = response.text
+        if len(body.encode()) > _MAX_SECRET_VALUE_SIZE:
+            raise ValueError(
+                f"Secret response too large: {len(body.encode())} bytes "
+                f"(max {_MAX_SECRET_VALUE_SIZE} bytes)"
+            )
+        return body
 
     @field_validator("headers")
     @classmethod
@@ -126,7 +163,13 @@ class LookupSecret(SecretSource):
                         f"Skipping redacted header '{key}' during serialization"
                     )
                     continue
-                result[key] = secret_value
+                # serialize_secret may return a SecretStr (redact mode) —
+                # extract the string representation explicitly so the result
+                # dict contains plain strings, not SecretStr objects.
+                if isinstance(secret_value, SecretStr):
+                    result[key] = str(secret_value)
+                else:
+                    result[key] = secret_value
             else:
                 result[key] = value
         return result
