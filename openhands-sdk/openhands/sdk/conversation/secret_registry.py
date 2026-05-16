@@ -10,6 +10,7 @@ from openhands.sdk.logger import get_logger
 from openhands.sdk.secret import SecretSource, SecretValue, StaticSecret
 from openhands.sdk.utils.models import OpenHandsModel
 
+
 if TYPE_CHECKING:
     from openhands.sdk.tool.schema import Observation
 

@@ -211,9 +211,7 @@ class _ActionBatch:
                             for c in event.observation.to_llm_content
                             if isinstance(c, TextContent)
                         )
-                        leaks = self.secret_registry.check_for_leaks(
-                            observation_text
-                        )
+                        leaks = self.secret_registry.check_for_leaks(observation_text)
                         if leaks:
                             names = ", ".join(leaks.keys())
                             logger.warning(
