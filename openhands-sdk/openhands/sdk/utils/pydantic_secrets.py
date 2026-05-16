@@ -90,6 +90,11 @@ def validate_secret(v: str | SecretStr | None, info) -> SecretStr | None:
     - If decryption fails, the cipher returns None and a warning is logged
     - This gracefully handles conversations encrypted with different keys or were redacted
     """  # noqa: E501
+    if v is not None and not isinstance(v, (str, SecretStr)):
+        raise TypeError(
+            f"Secret must be str, SecretStr, or None, got {type(v).__name__}"
+        )
+
     if v is None:
         return None
 
@@ -106,7 +111,14 @@ def validate_secret(v: str | SecretStr | None, info) -> SecretStr | None:
     # check if a cipher is supplied
     if info.context and info.context.get("cipher"):
         cipher: Cipher = info.context.get("cipher")
-        return cipher.decrypt(secret_value)
+        decrypted = cipher.decrypt(secret_value)
+        if decrypted is not None:
+            decrypted_value = decrypted.get_secret_value()
+            # Normalize empty / whitespace-only after decryption, matching
+            # the pre-decryption checks above for plaintext input.
+            if not decrypted_value or not decrypted_value.strip():
+                return None
+        return decrypted
 
     # Always return SecretStr
     if isinstance(v, SecretStr):

@@ -162,44 +162,32 @@ def test_validate_secret_none_returns_none(mock_info):
 
 
 def test_validate_secret_invalid_type_int_raises_error(mock_info):
-    """validate_secret raises TypeError for invalid int type.
-
-    The function signature expects str | SecretStr | None. Passing an int
-    fails when trying to call .strip() on the value.
-    """
-    with pytest.raises((TypeError, AttributeError)):
+    """validate_secret raises TypeError for int (not str/SecretStr/None)."""
+    with pytest.raises(TypeError, match="str, SecretStr, or None"):
         validate_secret(123, mock_info({}))  # type: ignore[arg-type]
 
 
-def test_validate_secret_invalid_type_dict_returns_none(mock_info):
-    """validate_secret handles empty dict gracefully (returns None).
-
-    Empty dict is falsy, so it's treated as empty/missing secret.
-    Note: Non-empty dicts would fail when .strip() is called.
-    """
-    result = validate_secret({}, mock_info({}))  # type: ignore[arg-type]
-    assert result is None
+def test_validate_secret_invalid_type_dict_raises_error(mock_info):
+    """validate_secret raises TypeError for dict (not str/SecretStr/None)."""
+    with pytest.raises(TypeError, match="str, SecretStr, or None"):
+        validate_secret({}, mock_info({}))  # type: ignore[arg-type]
 
 
-def test_validate_secret_invalid_type_list_returns_none(mock_info):
-    """validate_secret handles empty list gracefully (returns None).
-
-    Empty list is falsy, so it's treated as empty/missing secret.
-    Note: Non-empty lists would fail when .strip() is called.
-    """
-    result = validate_secret([], mock_info({}))  # type: ignore[arg-type]
-    assert result is None
+def test_validate_secret_invalid_type_list_raises_error(mock_info):
+    """validate_secret raises TypeError for list (not str/SecretStr/None)."""
+    with pytest.raises(TypeError, match="str, SecretStr, or None"):
+        validate_secret([], mock_info({}))  # type: ignore[arg-type]
 
 
 def test_validate_secret_nonempty_dict_raises_error(mock_info):
-    """validate_secret raises error for non-empty dict (invalid type)."""
-    with pytest.raises((TypeError, AttributeError)):
+    """validate_secret raises TypeError for non-empty dict (not str/SecretStr/None)."""
+    with pytest.raises(TypeError, match="str, SecretStr, or None"):
         validate_secret({"key": "value"}, mock_info({}))  # type: ignore[arg-type]
 
 
 def test_validate_secret_nonempty_list_raises_error(mock_info):
-    """validate_secret raises error for non-empty list (invalid type)."""
-    with pytest.raises((TypeError, AttributeError)):
+    """validate_secret raises TypeError for non-empty list (not str/SecretStr/None)."""
+    with pytest.raises(TypeError, match="str, SecretStr, or None"):
         validate_secret(["value"], mock_info({}))  # type: ignore[arg-type]
 
 
@@ -259,6 +247,32 @@ def test_validate_secret_with_cipher_wrong_key_returns_none(mock_info, cipher):
 
     result = validate_secret(encrypted, mock_info({"cipher": other_cipher}))
     assert result is None
+
+
+def test_validate_secret_encrypted_empty_string_returns_none(mock_info, cipher):
+    """Encrypted empty string must still return None after decryption.
+
+    The empty-to-None normalization runs BEFORE decryption, so an encrypted
+    empty string bypasses it. An empty secret should always be None.
+    """
+    encrypted_empty = cipher.encrypt(SecretStr(""))
+    assert encrypted_empty is not None  # is valid ciphertext
+
+    result = validate_secret(encrypted_empty, mock_info({"cipher": cipher}))
+    assert result is None, (
+        f"Encrypted empty string should normalize to None, got {result!r}"
+    )
+
+
+def test_validate_secret_encrypted_whitespace_returns_none(mock_info, cipher):
+    """Encrypted whitespace-only string must return None after decryption."""
+    encrypted_ws = cipher.encrypt(SecretStr("   "))
+    assert encrypted_ws is not None
+
+    result = validate_secret(encrypted_ws, mock_info({"cipher": cipher}))
+    assert result is None, (
+        f"Encrypted whitespace should normalize to None, got {result!r}"
+    )
 
 
 # ── Round-trip tests ────────────────────────────────────────────────────
