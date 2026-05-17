@@ -222,3 +222,46 @@ def test_llm_model_validate_json_dict() -> None:
     assert deserialized_llm.model == llm.model
     assert deserialized_llm.top_p == llm.top_p
     assert deserialized_llm.model_dump() == llm.model_dump()
+
+
+def test_extra_headers_redacts_secret_values_in_model_dump():
+    """``LLM.model_dump`` must redact known secret headers in extra_headers.
+
+    Without explicit protection, API keys placed in extra_headers leak in
+    plaintext through model_dump, repr, and on-disk persistence — even when
+    a cipher is configured.
+    """
+    from openhands.sdk.utils.cipher import Cipher
+
+    llm = LLM(
+        model="gpt-4o",
+        extra_headers={
+            "x-api-key": "sk-hidden-in-headers",
+            "X-Custom": "not-a-secret",
+        },
+    )
+    cipher = Cipher("test-key-12chars")
+
+    # Without expose context: secret headers must be redacted.
+    dumped = llm.model_dump(mode="json")
+    assert dumped["extra_headers"]["x-api-key"] == "**********", (
+        f"secret header leaked: {dumped['extra_headers']}"
+    )
+    assert dumped["extra_headers"]["X-Custom"] == "not-a-secret"
+
+    # With cipher: secret headers must be encrypted, non-secrets left alone.
+    dumped_c = llm.model_dump(mode="json", context={"cipher": cipher})
+    assert dumped_c["extra_headers"]["x-api-key"].startswith("gAAAAA"), (
+        f"secret header not encrypted: {dumped_c['extra_headers']}"
+    )
+    assert dumped_c["extra_headers"]["X-Custom"] == "not-a-secret"
+
+
+def test_extra_headers_repr_does_not_leak_secrets():
+    """``repr(LLM)`` must not expose secret values in extra_headers."""
+    llm = LLM(
+        model="gpt-4o",
+        extra_headers={"Authorization": "Bearer abc123secret"},
+    )
+    r = repr(llm)
+    assert "abc123secret" not in r, f"repr leaks auth token: {r}"

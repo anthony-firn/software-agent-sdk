@@ -24,7 +24,11 @@ from pydantic.json_schema import SkipJsonSchema
 from openhands.sdk.llm.fallback_strategy import FallbackStrategy
 from openhands.sdk.llm.utils.model_info import get_litellm_model_info
 from openhands.sdk.settings.metadata import SettingProminence, field_meta
-from openhands.sdk.utils.pydantic_secrets import serialize_secret, validate_secret
+from openhands.sdk.utils.pydantic_secrets import (
+    serialize_secret,
+    validate_secret,
+)
+from openhands.sdk.utils.redact import is_secret_key
 
 
 if TYPE_CHECKING:  # type hints only, avoid runtime import cycle
@@ -595,6 +599,44 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
     @field_serializer(*LLM_SECRET_FIELDS, when_used="always")
     def _serialize_secrets(self, v: SecretStr | None, info):
         return serialize_secret(v, info)
+
+    @field_serializer("extra_headers", when_used="always")
+    def _serialize_extra_headers(
+        self, v: dict[str, str] | None, info
+    ) -> dict[str, str] | None:
+        """Redact or encrypt known secret header values during serialization."""
+        if not v:
+            return v
+        result: dict[str, str] = {}
+        for key, value in v.items():
+            if is_secret_key(key) and value:
+                serialized = serialize_secret(SecretStr(value), info)
+                if serialized is None:
+                    continue  # dropped by serialize_secret
+                result[key] = str(serialized)
+            else:
+                result[key] = value
+        return result
+
+    def __repr__(self) -> str:
+        """Safe repr that redacts secret values in extra_headers
+        and litellm_extra_body."""
+        safe_headers: dict[str, str] = {}
+        if self.extra_headers:
+            for k, v in self.extra_headers.items():
+                safe_headers[k] = "<redacted>" if is_secret_key(k) else v
+
+        safe_body: dict[str, object] = {}
+        if self.litellm_extra_body:
+            for k, v in self.litellm_extra_body.items():
+                safe_body[k] = "<redacted>" if is_secret_key(k) else v
+
+        return (
+            f"LLM(model={self.model!r}, api_key={self.api_key!r}, "
+            f"base_url={self.base_url!r}, "
+            f"extra_headers={safe_headers!r}, "
+            f"litellm_extra_body={safe_body!r}, ...)"
+        )
 
     # =========================================================================
     # Public API
