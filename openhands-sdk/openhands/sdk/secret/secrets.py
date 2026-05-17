@@ -93,6 +93,17 @@ class LookupSecret(SecretSource):
         _validate_url_scheme(resolved)
         return resolved
 
+    def __repr__(self) -> str:
+        """Safe repr that redacts auth headers to prevent token leaks."""
+        safe_headers = {
+            k: ("<redacted>" if is_secret_key(k) else v)
+            for k, v in self.headers.items()
+        }
+        return (
+            f"LookupSecret(url={self.url!r}, headers={safe_headers!r}"
+            f", description={self.description!r})"
+        )
+
     def get_value(self) -> str:
         response = httpx.get(self.url, headers=self.headers, timeout=30.0)
         response.raise_for_status()

@@ -396,3 +396,13 @@ def test_lookup_secret_accepts_https_url():
     """``LookupSecret`` must accept https URLs."""
     secret = LookupSecret(url="https://api.example.com/secrets/MY_TOKEN")
     assert secret.url == "https://api.example.com/secrets/MY_TOKEN"
+
+
+def test_lookup_secret_repr_does_not_leak_headers():
+    """``repr(LookupSecret)`` must not expose auth tokens in headers."""
+    ls = LookupSecret(
+        url="http://localhost:8000/get-secret",
+        headers={"Authorization": "Bearer abc123secret"},
+    )
+    r = repr(ls)
+    assert "abc123secret" not in r, f"repr leaks auth token: {r}"
