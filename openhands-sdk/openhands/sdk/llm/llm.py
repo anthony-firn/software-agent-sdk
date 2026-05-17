@@ -25,6 +25,7 @@ from openhands.sdk.llm.fallback_strategy import FallbackStrategy
 from openhands.sdk.llm.utils.model_info import get_litellm_model_info
 from openhands.sdk.settings.metadata import SettingProminence, field_meta
 from openhands.sdk.utils.pydantic_secrets import (
+    is_redacted_secret,
     serialize_secret,
     validate_secret,
 )
@@ -614,6 +615,28 @@ class LLM(BaseModel, RetryMixin, NonNativeToolCallingMixin):
                 if serialized is None:
                     continue  # dropped by serialize_secret
                 result[key] = str(serialized)
+            else:
+                result[key] = value
+        return result
+
+    @field_validator("extra_headers")
+    @classmethod
+    def _validate_extra_headers(
+        cls, v: dict[str, str] | None, info
+    ) -> dict[str, str] | None:
+        """Decrypt encrypted header values and drop redacted entries on load."""
+        if not v:
+            return v
+        result: dict[str, str] = {}
+        for key, value in v.items():
+            if is_secret_key(key):
+                if not value or not value.strip() or is_redacted_secret(value):
+                    continue  # drop empty / redacted
+                secret_value = validate_secret(SecretStr(value), info)
+                if secret_value is None:
+                    result[key] = value  # plaintext fallback
+                else:
+                    result[key] = secret_value.get_secret_value()
             else:
                 result[key] = value
         return result

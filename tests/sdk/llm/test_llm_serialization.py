@@ -265,3 +265,43 @@ def test_extra_headers_repr_does_not_leak_secrets():
     )
     r = repr(llm)
     assert "abc123secret" not in r, f"repr leaks auth token: {r}"
+
+
+def test_extra_headers_deserializes_encrypted_values():
+    """Encrypted values in extra_headers must be decrypted when loading."""
+    from openhands.sdk.utils.cipher import Cipher
+
+    cipher = Cipher("test-key-12chars")
+    encrypted = cipher.encrypt(SecretStr("sk-decrypt-me"))
+    assert encrypted is not None
+    assert encrypted.startswith("gAAAAA")
+
+    llm = LLM.model_validate(
+        {
+            "model": "gpt-4o",
+            "extra_headers": {
+                "Authorization": encrypted,
+                "X-Custom": "plain-value",
+            },
+        },
+        context={"cipher": cipher},
+    )
+    assert llm.extra_headers is not None
+    assert llm.extra_headers["Authorization"] == "sk-decrypt-me"
+    assert llm.extra_headers["X-Custom"] == "plain-value"
+
+
+def test_extra_headers_drops_redacted_on_deserialize():
+    """Redacted (**********) header values must be dropped on deserialization."""
+    llm = LLM.model_validate(
+        {
+            "model": "gpt-4o",
+            "extra_headers": {
+                "Authorization": "**********",
+                "X-Custom": "still-here",
+            },
+        },
+    )
+    assert llm.extra_headers is not None
+    assert "Authorization" not in llm.extra_headers
+    assert llm.extra_headers["X-Custom"] == "still-here"
