@@ -367,7 +367,7 @@ jobs:
 
             - name: Notify Slack
               if: env.SLACK_BOT_TOKEN != ''
-              uses: slackapi/slack-github-action@v3.0.3
+              uses: slackapi/slack-github-action@v4.0.0
               with:
                   method: chat.postMessage
                   token: ${{ env.SLACK_BOT_TOKEN }}
